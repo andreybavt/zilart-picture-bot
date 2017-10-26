@@ -1,3 +1,4 @@
+#!/usr/bin/env nodejs
 const fs = require('fs');
 const TelegramBot = require('node-telegram-bot-api');
 const http = require('http');
@@ -60,6 +61,19 @@ let getCourses = function (action, chatId) {
             const dom = new JSDOM(dataString);
             try {
                 let dateStrings = Array.from(dom.window.document.querySelectorAll('.construction_item > .carousel_item_title')).map(e => e.textContent);
+                Array.from(dom.window.document.querySelectorAll('.constr_dates_frame')[0].querySelectorAll('.constr_date')).map(e => {
+                    http.get(`http://zilart.ru${e['href']}`, (res) => {
+                        let dataString = "";
+                        res.on('data', (d) => {
+                            dataString += d;
+                        });
+                        res.on('end', (d) => {
+                            const dom = new JSDOM(dataString);
+                            let script = Array.from(dom.window.document.querySelectorAll('script')).filter(e => e.text.includes('constr_images'))[0].text;
+                        });
+                    });
+
+                });
                 action(dateStrings);
             } catch (e) {
                 console.warn("Couldn't parse html: ", e);
@@ -81,9 +95,12 @@ bot.on('message', (msg) => {
     addNewChat(chatId);
 
     bot.sendMessage(chatId, 'Проверяю...');
-    getCourses(function (data) {
+    getCourses(data =>{
         bot.sendMessage(chatId, `Последние фото: <a href="http://zilart.ru/construction">${findLastDate(data)}</a>`, {parse_mode: 'HTML'});
+        for (let i = 1; i < 5; i++) {
+            bot.sendPhoto(chatId, `http://zilart.ru/public/images/construction/2017.09/6/${i}.jpg`);
 
+        }
     }, chatId);
 
 
