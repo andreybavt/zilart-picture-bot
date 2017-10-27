@@ -1,4 +1,5 @@
 #!/usr/bin/env nodejs
+"use strict";
 const fs = require('fs');
 const TelegramBot = require('node-telegram-bot-api');
 const http = require('http');
@@ -6,31 +7,54 @@ let human = require('human-time');
 let humanize = require('humanize');
 const jsdom = require("jsdom");
 const {JSDOM} = jsdom;
+const request = require('request');
 
 
 let CACHE = new Set();
 const BASE_URL = 'http://zilart.ru';
 let CHATS = new Set();
 
-function fetchRegular() {
-    getCourses(function (data) {
-        let hasNew = new Set([...data].filter(x => !CACHE.has(x))).size > 0;
-        if (hasNew) {
-            CACHE = new Set(data);
-            fs.writeFile("cache", JSON.stringify(data), function (err) {
-                if (err) {
-                    return console.log(err);
-                }
-                console.log("The file was saved!");
-            });
-            let lastDate = findLastDate(data);
-            CHATS.forEach((e) => {
-                bot.sendMessage(e, `Новые официальные фото: <a href="http://zilart.ru/construction">${findLastDate(data)}</a>`, {parse_mode: 'HTML'});
-            });
+async function fetchRegular() {
+    let pictureBatchesNames = await getPictureBatchesNames();
+    let lastMonth = findLastDate([...pictureBatchesNames]);
+    let hasNew = new Set([...pictureBatchesNames].filter(x => !CACHE.has(x))).size > 0;
+    if (hasNew) {
+        CACHE = pictureBatchesNames;
+        fs.writeFileSync("cache", JSON.stringify([...pictureBatchesNames]), function (err) {
+            if (err) {
+                return console.log(err);
+            }
+            console.log("The file was saved!");
+        });
+        let pics = await withRetry(getPhotos);
+
+        for (let e of CHATS) {
+            await bot.sendMessage(e, `Новые официальные фото: <a href="http://zilart.ru/construction">${lastMonth}</a>`, {parse_mode: 'HTML'}).then();
+            if (pics) {
+                sendPicsToChat(pics, e);
+            }
         }
-    });
+    }
 }
 
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function withRetry(fn, retry_count) {
+    retry_count = retry_count || 0;
+    try {
+        if (retry_count > 10) {
+            return null;
+        } else {
+            return await fn();
+        }
+    } catch (e) {
+        console.error(new Date().toISOString(), 'withRetry', e);
+        await sleep(retry_count * 1000 * 20);
+        return withRetry(fn, retry_count + 1);
+    }
+}
 
 const token = '389059717:AAHHvfkPzWI1U1_zTQFbvYIZHFundqAuw3g';
 const bot = new TelegramBot(token, {polling: true});
@@ -51,67 +75,80 @@ let addNewChat = function (chatId) {
 };
 
 
-let getCourses = function (action, chatId) {
-    http.get('http://zilart.ru/construction', (res) => {
-        let dataString = "";
-        res.on('data', (d) => {
-            dataString += d;
-        });
-        res.on('end', (d) => {
-            const dom = new JSDOM(dataString);
-            try {
-                let dateStrings = Array.from(dom.window.document.querySelectorAll('.construction_item > .carousel_item_title')).map(e => e.textContent);
-                Array.from(dom.window.document.querySelectorAll('.constr_dates_frame')[0].querySelectorAll('.constr_date')).map(e => {
-                    http.get(`http://zilart.ru${e['href']}`, (res) => {
-                        let dataString = "";
-                        res.on('data', (d) => {
-                            dataString += d;
-                        });
-                        res.on('end', (d) => {
-                            const dom = new JSDOM(dataString, {
-                                runScripts: "outside-only"});
-;
-                            let script = Array.from(dom.window.document.querySelectorAll('script')).filter(e => e.text.includes('constr_images'))[0].text;
-                            dom.window.eval(script);
-                            let house_url = dom.window.document.querySelector('.gallery_place[data-path]').getAttribute('data-path');
-                            let pic_urls = Object.keys(dom.window.constr_images);
-                            pic_urls.forEach(pic=>{
-                                bot.sendPhoto(chatId, `${BASE_URL}${house_url}${pic}`);
-                            })
-                        });
-                    });
+function doGet(url) {
+    return new Promise((resolve, reject) => {
+        try {
 
+            http.get(`http://zilart.ru${url}`, (res) => {
+                let dataString = "";
+                res.on('data', (d) => {
+                    dataString += d;
                 });
-                action(dateStrings);
-            } catch (e) {
-                console.warn("Couldn't parse html: ", e);
-                if (chatId) {
-                    bot.sendMessage(chatId, "Couldn't parse html: " + e)
-                }
-            }
-        });
+                res.on('end', (d) => {
+                    resolve(dataString);
+                });
+            })
+        } catch (e) {
+            console.error('Get failed', e);
+            reject(e);
+        }
+    });
+}
 
-    }).on('error', (e) => {
-        console.error(e);
+let getPictureBatchesNames = async function () {
+    const dataString = await doGet('/construction')
+    const dom = new JSDOM(dataString);
+    return new Set(Array.from(dom.window.document.querySelectorAll('.construction_item > .carousel_item_title')).map(e => e.textContent));
+}
+
+let getPhotos = async function (action) {
+    return await doGet('/construction').then(dataString => {
+        const dom = new JSDOM(dataString);
+        let dateStrings = Array.from(dom.window.document.querySelectorAll('.construction_item > .carousel_item_title')).map(e => e.textContent);
+        let lastMonthSection = dom.window.document.querySelector('.construction_item');
+        let lastMonthText = lastMonthSection.querySelector('.carousel_item_title').textContent;
+
+        let pictureBatches = Array.from(lastMonthSection.querySelectorAll('.constr_dates_frame .constr_date'));
+        return Promise.all(pictureBatches.map(lotBatch => {
+                return doGet(lotBatch['href']).then(dataString => {
+                    const dom = new JSDOM(dataString, {
+                        runScripts: "outside-only"
+                    });
+                    let script = Array.from(dom.window.document.querySelectorAll('script')).filter(e => e.text.includes('constr_images'))[0].text;
+                    dom.window.eval(script);
+                    let house_url = dom.window.document.querySelector('.gallery_place[data-path]').getAttribute('data-path');
+                    let pic_urls = Object.keys(dom.window.constr_images);
+                    return pic_urls.map(pic => {
+                        return {lot: lotBatch.text, url: `${BASE_URL}${house_url}${pic}`}
+                    });
+                })
+            })
+        ).then(pics => {
+            return {month: lastMonthText, pics: pics}
+        });
     });
 };
 let elementsToMessage = function (messages) {
     return messages.sort((one, other) => one.realStartDate - other.realStartDate).map(sessionToString).join('\n\n');
 };
-bot.on('message', (msg) => {
+
+async function sendPicsToChat(pics, chatId) {
+    for (let i = 0; i < pics.pics.length; i++) {
+        await Promise.all(pics.pics[i].map(pic => bot.sendPhoto(chatId, pic.url, {caption: `${pic.lot} - ${pics.month}`})));
+    }
+}
+
+bot.on('message', async function (msg) {
     const chatId = msg.chat.id;
     addNewChat(chatId);
 
     bot.sendMessage(chatId, 'Проверяю...');
-    getCourses(data =>{
-        bot.sendMessage(chatId, `Последние фото: <a href="${BASE_URL}/construction">${findLastDate(data)}</a>`, {parse_mode: 'HTML'});
-        for (let i = 1; i < 5; i++) {
-            bot.sendPhoto(chatId, `http://zilart.ru/public/images/construction/2017.09/6/${i}.jpg`);
-
-        }
-    }, chatId);
-
-
+    let pics = await withRetry(getPhotos);
+    if (pics) {
+        await sendPicsToChat(pics, chatId);
+    } else {
+        bot.sendMessage(chatId, 'Не получилось проверить фото, попробуйте попозже.');
+    }
 });
 
 function findLastDate(data) {
@@ -122,6 +159,9 @@ function findLastDate(data) {
     let last = '' + values[values.length - 1];
     return last.slice(4, 6) + '.' + last.slice(0, 4)
 }
+
+!fs.existsSync('cache') && fs.writeFileSync('cache', JSON.stringify([]));
+!fs.existsSync('chats') && fs.writeFileSync('chats', JSON.stringify([]));
 
 fs.readFile("cache", 'utf8', function (err, d) {
     if (err) {
