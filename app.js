@@ -9,7 +9,7 @@ const {JSDOM} = jsdom;
 
 
 let CACHE = new Set();
-
+const BASE_URL = 'http://zilart.ru';
 let CHATS = new Set();
 
 function fetchRegular() {
@@ -68,8 +68,16 @@ let getCourses = function (action, chatId) {
                             dataString += d;
                         });
                         res.on('end', (d) => {
-                            const dom = new JSDOM(dataString);
+                            const dom = new JSDOM(dataString, {
+                                runScripts: "outside-only"});
+;
                             let script = Array.from(dom.window.document.querySelectorAll('script')).filter(e => e.text.includes('constr_images'))[0].text;
+                            dom.window.eval(script);
+                            let house_url = dom.window.document.querySelector('.gallery_place[data-path]').getAttribute('data-path');
+                            let pic_urls = Object.keys(dom.window.constr_images);
+                            pic_urls.forEach(pic=>{
+                                bot.sendPhoto(chatId, `${BASE_URL}${house_url}${pic}`);
+                            })
                         });
                     });
 
@@ -96,7 +104,7 @@ bot.on('message', (msg) => {
 
     bot.sendMessage(chatId, 'Проверяю...');
     getCourses(data =>{
-        bot.sendMessage(chatId, `Последние фото: <a href="http://zilart.ru/construction">${findLastDate(data)}</a>`, {parse_mode: 'HTML'});
+        bot.sendMessage(chatId, `Последние фото: <a href="${BASE_URL}/construction">${findLastDate(data)}</a>`, {parse_mode: 'HTML'});
         for (let i = 1; i < 5; i++) {
             bot.sendPhoto(chatId, `http://zilart.ru/public/images/construction/2017.09/6/${i}.jpg`);
 
