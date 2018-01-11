@@ -8,7 +8,7 @@ let humanize = require('humanize');
 const jsdom = require("jsdom");
 const {JSDOM} = jsdom;
 const request = require('request');
-
+const sharp = require('sharp');
 
 let CACHE = new Set();
 const BASE_URL = 'http://zilart.ru';
@@ -56,7 +56,7 @@ async function withRetry(fn, retry_count) {
     }
 }
 
-const token = '389059717:AAHHvfkPzWI1U1_zTQFbvYIZHFundqAuw3g';
+const token = '389059717:AAGXAaHa6TkPgQfqd371_bxe4S2c3gMy7B0';
 const bot = new TelegramBot(token, {polling: true});
 
 
@@ -118,9 +118,10 @@ let getPhotos = async function (action) {
                     dom.window.eval(script);
                     let house_url = dom.window.document.querySelector('.gallery_place[data-path]').getAttribute('data-path');
                     let pic_urls = Object.keys(dom.window.constr_images);
-                    return pic_urls.map(pic => {
+                    let res = pic_urls.map(pic => {
                         return {lot: lotBatch.text, url: `${BASE_URL}${house_url}${pic}`}
                     });
+                    return res;
                 })
             })
         ).then(pics => {
@@ -133,21 +134,51 @@ let elementsToMessage = function (messages) {
 };
 
 async function sendPicsToChat(pics, chatId) {
+    var request = require('request');
     for (let i = 0; i < pics.pics.length; i++) {
-        await Promise.all(pics.pics[i].map(pic => bot.sendPhoto(chatId, pic.url, {caption: `${pic.lot} - ${pics.month}`})));
+        await Promise.all(pics.pics[i].map(pic => {
+            const requestSettings = {
+                method: 'GET',
+                url: pic.url,
+                encoding: null
+            };
+            console.log('Sending pics', pic.lot);
+            return new Promise(function (resolve, reject) {
+                request(requestSettings, function (error, response, body) {
+                    sharp(body)
+                        .rotate()
+                        .resize(4000)
+                        .toBuffer().then(data => {
+                        bot.sendPhoto(chatId, data, {caption: `${pic.lot} - ${pics.month}`}).then(resolve());
+                    });
+                })
+            });
+        }));
     }
 }
 
 bot.on('message', async function (msg) {
+    console.log(msg);
     const chatId = msg.chat.id;
     addNewChat(chatId);
 
-    bot.sendMessage(chatId, 'Проверяю...');
-    let pics = await withRetry(getPhotos);
-    if (pics) {
-        await sendPicsToChat(pics, chatId);
-    } else {
-        bot.sendMessage(chatId, 'Не получилось проверить фото, попробуйте попозже.');
+    if (msg.text === 'charts') {
+        run_analysis(chatId)
+    } else if (msg.text === '/start' || msg.text === '/pics') {
+        console.log('Checking chat', msg.chat.id);
+        console.log('Checking from', msg.from.id);
+        if ([-1001116267410, -254128993].includes(msg.chat.id) && ![347466353, 49405469, 121939883].includes(msg.from.id)) {
+            bot.sendMessage(chatId, 'Попросите администраторов выполнить это');
+        } else {
+            bot.sendMessage(chatId, 'Проверяю...');
+            let pics = await withRetry(getPhotos);
+            console.log(pics, chatId);
+            if (pics) {
+                await sendPicsToChat(pics, chatId);
+            } else {
+                bot.sendMessage(chatId, 'Не получилось проверить фото, попробуйте попозже.');
+            }
+        }
     }
 });
 
@@ -180,7 +211,46 @@ fs.readFile("cache", 'utf8', function (err, d) {
                 fetchRegular();
             }
         }, 1000 * 60 * 5);
+
+        var CronJob = require('cron').CronJob;
+        new CronJob('00 30 16 * * 5', function () {
+            // new CronJob('00 36 20 * * 1', function() {
+            console.log('Starting analysis');
+            run_analysis()
+        }, null, true, 'Europe/Moscow');
+
+
     });
 
 });
 
+
+async function run_analysis(chatId) {
+    let CONFIG = JSON.parse(fs.readFileSync('CONFIG.json'));
+
+    var util = require('util'),
+        exec = require('child_process').exec,
+        child;
+
+    async function sendInfographics(error, stdout, stderr) {
+        let replyTo = chatId ? [chatId] : CHATS;
+        console.log('REPLYING TO', replyTo);
+        replyTo.forEach(chatId => {
+            bot.sendPhoto(chatId, `${CONFIG['analysis_result_loc']}/booked-statistics.png`);
+            bot.sendPhoto(chatId, `${CONFIG['analysis_result_loc']}/sqm-price-statistics.png`);
+            bot.sendPhoto(chatId, `${CONFIG['analysis_result_loc']}/sold-by-day-statistics.png`);
+            bot.sendPhoto(chatId, `${CONFIG['analysis_result_loc']}/unsold-by-day-statistics.png`);
+            if (fs.existsSync(`${CONFIG['analysis_result_loc']}/booked-table.png`)) {
+                bot.sendPhoto(chatId, `${CONFIG['analysis_result_loc']}/booked-table.png`);
+            }
+            if (fs.existsSync(`${CONFIG['analysis_result_loc']}/unbooked-table.png`)) {
+                bot.sendPhoto(chatId, `${CONFIG['analysis_result_loc']}/unbooked-table.png`);
+            }
+        });
+        if (error !== null) {
+            console.log('exec error: ' + error);
+        }
+    };
+
+    exec(`ipython nbconvert --execute ${CONFIG.analysis_script_loc}`, sendInfographics);
+}
